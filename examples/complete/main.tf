@@ -1,26 +1,10 @@
 # Complete example of the Azure Key Vault module usage
-# This example demonstrates all module features including secrets, keys, and certificates
+# This example demonstrates all module features including secrets, keys, and certificates.
+# Secret values never live in code. Pass them through the sensitive `secrets` variable
+# (for example with TF_VAR_secrets or an untracked *.tfvars file).
 
-terraform {
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 3.0"
-    }
-    azuread = {
-      source  = "hashicorp/azuread"
-      version = "~> 2.0"
-    }
-  }
-}
-
-provider "azurerm" {
-  features {
-    key_vault {
-      purge_soft_delete_on_destroy    = true
-      recover_soft_deleted_key_vaults = true
-    }
-  }
+locals {
+  key_vault_name = "${var.key_vault_name_prefix}-${random_string.suffix.result}"
 }
 
 # Data sources for existing resources
@@ -32,6 +16,13 @@ data "azuread_user" "admin_user" {
 
 data "azuread_service_principal" "app_service_principal" {
   display_name = var.app_service_principal_name
+}
+
+# Random suffix for a globally unique Key Vault name
+resource "random_string" "suffix" {
+  length  = 8
+  special = false
+  upper   = false
 }
 
 # Resource group for the example
@@ -46,7 +37,7 @@ resource "azurerm_resource_group" "example" {
 module "key_vault" {
   source = "../../"
 
-  key_vault_name      = var.key_vault_name
+  key_vault_name      = local.key_vault_name
   location            = azurerm_resource_group.example.location
   resource_group_name = azurerm_resource_group.example.name
   sku_name            = var.key_vault_sku
@@ -56,13 +47,22 @@ module "key_vault" {
   purge_protection_enabled      = var.purge_protection_enabled
   public_network_access_enabled = var.public_network_access_enabled
 
-  # Network access control (always configured for security)
+  # The firewall denies everything not listed here
   network_acls = {
     bypass                     = "AzureServices"
     default_action             = "Deny"
     ip_rules                   = var.allowed_ip_ranges
     virtual_network_subnet_ids = var.allowed_subnet_ids
   }
+
+  # Private Link access
+  private_endpoint = {
+    subnet_id            = var.private_endpoint_subnet_id
+    private_dns_zone_ids = var.private_dns_zone_ids
+  }
+
+  # Audit and resource logging
+  log_analytics_workspace_id = var.log_analytics_workspace_id
 
   # RBAC role assignments
   rbac_assignments = {
@@ -83,44 +83,16 @@ module "key_vault" {
     }
   }
 
-  # Secrets management
-  secrets = var.create_sample_secrets ? {
-    "database-connection-string" = {
-      value        = "Server=myserver.database.windows.net;Database=mydb;User Id=myuser;Password=MySecurePassword123!;"
-      content_type = "text/plain"
-      tags = {
-        Application = "WebApp"
-        SecretType  = "ConnectionString"
-        Environment = var.environment
-      }
-    }
-    "storage-account-key" = {
-      value        = "DefaultEndpointsProtocol=https;AccountName=mystorageaccount;AccountKey=ABC123...;EndpointSuffix=core.windows.net"
-      content_type = "text/plain"
-      tags = {
-        Application = "WebApp"
-        SecretType  = "StorageKey"
-        Environment = var.environment
-      }
-    }
-    "api-key" = {
-      value           = "sk-1234567890abcdef1234567890abcdef"
-      expiration_date = "2025-12-31T23:59:59Z"
-      content_type    = "text/plain"
-      tags = {
-        Application = "WebApp"
-        SecretType  = "APIKey"
-        Environment = var.environment
-      }
-    }
-  } : {}
+  # Secret values come in at runtime and never live in code
+  secrets = var.secrets
 
-  # Key management
+  # Every key has an expiration date and a rotation policy
   keys = var.create_sample_keys ? {
     "data-encryption-key" = {
-      key_type = "RSA"
-      key_size = 2048
-      key_opts = ["decrypt", "encrypt", "sign", "verify", "wrapKey", "unwrapKey"]
+      key_type        = "RSA"
+      key_size        = 2048
+      key_opts        = ["decrypt", "encrypt", "wrapKey", "unwrapKey"]
+      expiration_date = var.key_expiration_date
       rotation_policy = {
         automatic = {
           time_before_expiry = "P30D"
@@ -135,9 +107,17 @@ module "key_vault" {
       }
     }
     "signing-key" = {
-      key_type = "RSA"
-      key_size = 2048
-      key_opts = ["sign", "verify"]
+      key_type        = "RSA"
+      key_size        = 2048
+      key_opts        = ["sign", "verify"]
+      expiration_date = var.key_expiration_date
+      rotation_policy = {
+        automatic = {
+          time_before_expiry = "P30D"
+        }
+        expire_after         = "P12M"
+        notify_before_expiry = "P30D"
+      }
       tags = {
         Usage       = "DocumentSigning"
         Application = "WebApp"
@@ -195,30 +175,4 @@ module "key_vault" {
   } : {}
 
   tags = var.tags
-}
-
-# Output the Key Vault information
-output "key_vault_uri" {
-  description = "The URI of the created Key Vault"
-  value       = module.key_vault.key_vault_uri
-}
-
-output "key_vault_id" {
-  description = "The ID of the created Key Vault"
-  value       = module.key_vault.key_vault_id
-}
-
-output "secret_ids" {
-  description = "The IDs of created secrets"
-  value       = module.key_vault.secret_ids
-}
-
-output "key_ids" {
-  description = "The IDs of created keys"
-  value       = module.key_vault.key_ids
-}
-
-output "certificate_ids" {
-  description = "The IDs of created certificates"
-  value       = module.key_vault.certificate_ids
 }

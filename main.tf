@@ -1,18 +1,8 @@
 # Azure Key Vault Terraform Module
 # This module creates an Azure Key Vault with RBAC authorization and manages secrets, keys, and certificates
 
-terraform {
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 3.0"
-    }
-    azuread = {
-      source  = "hashicorp/azuread"
-      version = "~> 2.0"
-    }
-  }
-}
+# Current client configuration, used for the tenant ID
+data "azurerm_client_config" "current" {}
 
 # Key Vault Resource
 resource "azurerm_key_vault" "main" {
@@ -32,15 +22,59 @@ resource "azurerm_key_vault" "main" {
   # Network access settings
   public_network_access_enabled = var.public_network_access_enabled
 
-  # Always enforce network ACLs for security
+  tags = var.tags
+
+  # The firewall is always on because default_action must be "Deny"
   network_acls {
     bypass                     = var.network_acls.bypass
     default_action             = var.network_acls.default_action
     ip_rules                   = var.network_acls.ip_rules
     virtual_network_subnet_ids = var.network_acls.virtual_network_subnet_ids
   }
+}
+
+# Private endpoint so the vault is reachable over Private Link rather than the public internet
+resource "azurerm_private_endpoint" "key_vault" {
+  name                = "pe-${var.key_vault_name}"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  subnet_id           = var.private_endpoint.subnet_id
 
   tags = var.tags
+
+  private_service_connection {
+    name                           = "psc-${var.key_vault_name}"
+    private_connection_resource_id = azurerm_key_vault.main.id
+    subresource_names              = ["vault"]
+    is_manual_connection           = false
+  }
+
+  dynamic "private_dns_zone_group" {
+    for_each = length(var.private_endpoint.private_dns_zone_ids) > 0 ? [1] : []
+    content {
+      name                 = "default"
+      private_dns_zone_ids = var.private_endpoint.private_dns_zone_ids
+    }
+  }
+}
+
+# Send audit and resource logs to Log Analytics for security investigation
+resource "azurerm_monitor_diagnostic_setting" "key_vault" {
+  name                       = "diag-${var.key_vault_name}"
+  target_resource_id         = azurerm_key_vault.main.id
+  log_analytics_workspace_id = var.log_analytics_workspace_id
+
+  enabled_log {
+    category_group = "audit"
+  }
+
+  enabled_log {
+    category_group = "allLogs"
+  }
+
+  metric {
+    category = "AllMetrics"
+  }
 }
 
 # RBAC Role Assignments
@@ -55,17 +89,18 @@ resource "azurerm_role_assignment" "key_vault_rbac" {
 
 # Key Vault Secrets
 resource "azurerm_key_vault_secret" "secrets" {
-  for_each = var.secrets
+  # Iterate over names because sensitive values cannot key for_each
+  for_each = nonsensitive(toset(keys(var.secrets)))
 
   name         = each.key
-  value        = each.value.value
+  value        = var.secrets[each.key].value
   key_vault_id = azurerm_key_vault.main.id
 
-  content_type    = each.value.content_type
-  not_before_date = each.value.not_before_date
-  expiration_date = each.value.expiration_date
+  content_type    = var.secrets[each.key].content_type
+  not_before_date = var.secrets[each.key].not_before_date
+  expiration_date = var.secrets[each.key].expiration_date
 
-  tags = merge(var.tags, each.value.tags)
+  tags = merge(var.tags, var.secrets[each.key].tags)
 
   depends_on = [azurerm_role_assignment.key_vault_rbac]
 }
@@ -83,31 +118,33 @@ resource "azurerm_key_vault_key" "keys" {
   not_before_date = each.value.not_before_date
   expiration_date = each.value.expiration_date
 
-  dynamic "rotation_policy" {
-    for_each = each.value.rotation_policy != null ? [each.value.rotation_policy] : []
-    content {
-      automatic {
-        time_before_expiry = rotation_policy.value.automatic.time_before_expiry
-      }
-      expire_after         = rotation_policy.value.expire_after
-      notify_before_expiry = rotation_policy.value.notify_before_expiry
+  tags = merge(var.tags, each.value.tags)
+
+  # Rotation policy is required for every key (see var.keys validation)
+  rotation_policy {
+    expire_after         = each.value.rotation_policy.expire_after
+    notify_before_expiry = each.value.rotation_policy.notify_before_expiry
+
+    automatic {
+      time_before_expiry = each.value.rotation_policy.automatic.time_before_expiry
     }
   }
-
-  tags = merge(var.tags, each.value.tags)
 
   depends_on = [azurerm_role_assignment.key_vault_rbac]
 }
 
 # Key Vault Certificates
 resource "azurerm_key_vault_certificate" "certificates" {
-  for_each = var.certificates
+  # Iterate over names because sensitive values cannot key for_each
+  for_each = nonsensitive(toset(keys(var.certificates)))
 
   name         = each.key
   key_vault_id = azurerm_key_vault.main.id
 
+  tags = merge(var.tags, var.certificates[each.key].tags)
+
   dynamic "certificate_policy" {
-    for_each = each.value.certificate_policy != null ? [each.value.certificate_policy] : []
+    for_each = var.certificates[each.key].certificate_policy != null ? [var.certificates[each.key].certificate_policy] : []
     content {
       issuer_parameters {
         name = certificate_policy.value.issuer_parameters.name
@@ -136,8 +173,7 @@ resource "azurerm_key_vault_certificate" "certificates" {
       }
 
       x509_certificate_properties {
-        key_usage = certificate_policy.value.x509_certificate_properties.key_usage
-
+        key_usage          = certificate_policy.value.x509_certificate_properties.key_usage
         subject            = certificate_policy.value.x509_certificate_properties.subject
         validity_in_months = certificate_policy.value.x509_certificate_properties.validity_in_months
 
@@ -154,12 +190,13 @@ resource "azurerm_key_vault_certificate" "certificates" {
   }
 
   # For importing existing certificates
-  certificate {
-    contents = each.value.certificate_contents
-    password = each.value.certificate_password
+  dynamic "certificate" {
+    for_each = var.certificates[each.key].certificate_contents != null ? [1] : []
+    content {
+      contents = var.certificates[each.key].certificate_contents
+      password = var.certificates[each.key].certificate_password
+    }
   }
-
-  tags = merge(var.tags, each.value.tags)
 
   depends_on = [azurerm_role_assignment.key_vault_rbac]
 }

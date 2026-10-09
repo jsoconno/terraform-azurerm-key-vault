@@ -26,6 +26,13 @@ module "key_vault" {
   location            = "East US"
   resource_group_name = "my-resource-group"
 
+  # Private Link access and audit logging (both required)
+  private_endpoint = {
+    subnet_id            = azurerm_subnet.private_endpoints.id
+    private_dns_zone_ids = [azurerm_private_dns_zone.key_vault.id]
+  }
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+
   # RBAC role assignments
   rbac_assignments = {
     "admin-assignment" = {
@@ -66,6 +73,13 @@ module "key_vault" {
     ip_rules       = ["203.0.113.0/24", "198.51.100.0/24"]
   }
 
+  # Private Link access and audit logging (both required)
+  private_endpoint = {
+    subnet_id            = azurerm_subnet.private_endpoints.id
+    private_dns_zone_ids = [azurerm_private_dns_zone.key_vault.id]
+  }
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+
   # RBAC assignments
   rbac_assignments = {
     "admin-assignment" = {
@@ -85,10 +99,10 @@ module "key_vault" {
     }
   }
 
-  # Secrets
+  # Pass secret values in through sensitive variables and never hardcode them
   secrets = {
     "database-connection-string" = {
-      value        = "Server=myserver;Database=mydb;User Id=myuser;Password=mypassword;"
+      value        = var.database_connection_string
       content_type = "text/plain"
       tags = {
         Application = "WebApp"
@@ -96,8 +110,8 @@ module "key_vault" {
       }
     }
     "api-key" = {
-      value           = "super-secret-api-key-value"
-      expiration_date = "2024-12-31T23:59:59Z"
+      value           = var.api_key
+      expiration_date = "2027-12-31T23:59:59Z"
       tags = {
         Application = "WebApp"
         SecretType  = "APIKey"
@@ -111,6 +125,8 @@ module "key_vault" {
       key_type = "RSA"
       key_size = 2048
       key_opts = ["decrypt", "encrypt", "sign", "verify", "wrapKey", "unwrapKey"]
+      # Every key needs an expiry and a rotation policy with expire_after of 12 months or less
+      expiration_date = "2027-10-01T00:00:00Z"
       rotation_policy = {
         automatic = {
           time_before_expiry = "P30D"
@@ -215,36 +231,45 @@ Configure network access using the `network_acls` variable:
 ```hcl
 network_acls = {
   bypass         = "AzureServices"  # or "None"
-  default_action = "Deny"           # or "Allow"
+  default_action = "Deny"           # must be "Deny"; the firewall is always on
   ip_rules       = ["203.0.113.0/24"]
   virtual_network_subnet_ids = ["/subscriptions/.../subnets/subnet1"]
 }
 ```
 
+## Private Endpoint and Logging
+
+Every deployment gets a private endpoint (`vault` sub-resource) in the subnet you pass as `private_endpoint.subnet_id`. Pass the ID of a `privatelink.vaultcore.azure.net` private DNS zone in `private_endpoint.private_dns_zone_ids` so the vault name resolves to the private IP.
+
+A diagnostic setting sends the `audit` and `allLogs` category groups and `AllMetrics` to the Log Analytics workspace in `log_analytics_workspace_id`.
+
+Terraform itself talks to the vault's data plane to create secrets, keys and certificates. With public network access disabled, run Terraform from a network that can reach the private endpoint, or allow the runner's IP through `network_acls.ip_rules`.
+
 ## Requirements
 
 | Name | Version |
 |------|---------|
-| terraform | >= 1.0 |
+| terraform | >= 1.3.0 |
 | azurerm | ~> 3.0 |
-| azuread | ~> 2.0 |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
+| certificates | A map of certificates to create in the Key Vault. | `map(object)` | `{}` | no |
 | key_vault_name | The name of the Key Vault. Must be globally unique. | `string` | n/a | yes |
+| keys | A map of keys to create. Each key requires `expiration_date` and `rotation_policy` (`expire_after` <= 12 months). | `map(object)` | `{}` | no |
 | location | The Azure region where the Key Vault will be created. | `string` | n/a | yes |
+| log_analytics_workspace_id | Log Analytics workspace that receives audit and resource logs. | `string` | n/a | yes |
+| network_acls | Firewall configuration. `default_action` must be `Deny`. | `object` | deny, bypass AzureServices | no |
+| private_endpoint | `subnet_id` for the private endpoint and optional `private_dns_zone_ids`. | `object` | n/a | yes |
+| public_network_access_enabled | Whether public network access is allowed for this Key Vault. | `bool` | `false` | no |
+| purge_protection_enabled | Is Purge Protection enabled for this Key Vault? Must be true. | `bool` | `true` | no |
+| rbac_assignments | A map of RBAC role assignments for the Key Vault. | `map(object)` | `{}` | no |
 | resource_group_name | The name of the resource group in which to create the Key Vault. | `string` | n/a | yes |
+| secrets | A map of secrets to create in the Key Vault. | `map(object)` | `{}` | no |
 | sku_name | The Name of the SKU used for this Key Vault. Possible values are standard and premium. | `string` | `"standard"` | no |
 | soft_delete_retention_days | The number of days that items should be retained for once soft-deleted. | `number` | `90` | no |
-| purge_protection_enabled | Is Purge Protection enabled for this Key Vault? | `bool` | `true` | no |
-| public_network_access_enabled | Whether public network access is allowed for this Key Vault. | `bool` | `true` | no |
-| network_acls | Network ACL configuration for the Key Vault. | `object` | `null` | no |
-| rbac_assignments | A map of RBAC role assignments for the Key Vault. | `map(object)` | `{}` | no |
-| secrets | A map of secrets to create in the Key Vault. | `map(object)` | `{}` | no |
-| keys | A map of keys to create in the Key Vault. | `map(object)` | `{}` | no |
-| certificates | A map of certificates to create in the Key Vault. | `map(object)` | `{}` | no |
 | tags | A map of tags to assign to all resources. | `map(string)` | `{}` | no |
 
 ## Outputs
@@ -259,6 +284,9 @@ network_acls = {
 | secret_ids | A map of secret names to their IDs |
 | key_ids | A map of key names to their IDs |
 | certificate_ids | A map of certificate names to their IDs |
+| private_endpoint_id | The ID of the Key Vault private endpoint |
+| private_endpoint_ip_address | The private IP address of the private endpoint |
+| diagnostic_setting_id | The ID of the Key Vault diagnostic setting |
 
 ## Security-First Design
 
@@ -267,9 +295,12 @@ This module is **security-opinionated** and enforces several security best pract
 ### Mandatory Security Controls
 - **Purge Protection**: Always enabled and cannot be disabled to prevent accidental permanent deletion
 - **Soft Delete Retention**: Minimum 30 days (instead of Azure's 7-day minimum) for better recovery options
-- **Network ACLs**: Always configured with secure defaults (deny by default, allow Azure services)
+- **Network ACLs**: Firewall always on; `default_action` must be `Deny` (allow Azure services by default)
 - **Public Access**: Disabled by default to promote private endpoint usage
 - **Key Size Validation**: RSA keys must be at least 2048 bits for cryptographic security
+- **Key Lifecycle**: Every key must have an expiration date and a rotation policy that expires versions within 12 months
+- **Private Endpoint**: Always deployed so the vault is reachable over Private Link
+- **Audit Logging**: Diagnostic settings always send audit logs to Log Analytics
 
 ### Opinionated Defaults
 - `purge_protection_enabled = true` (cannot be changed)
