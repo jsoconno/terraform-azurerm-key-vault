@@ -1,13 +1,6 @@
 # Azure Key Vault Terraform Module
 # This module creates an Azure Key Vault with RBAC authorization and manages secrets, keys, and certificates
 
-locals {
-  # Secrets, keys and certificates need their RBAC roles in place before Terraform can write them.
-  # Referencing the role assignments here makes Terraform create them first, without an explicit
-  # dependency on each resource. The condition is always true, so the value is always the vault ID.
-  key_vault_id_after_rbac = length(azurerm_role_assignment.key_vault_rbac) >= 0 ? azurerm_key_vault.main.id : null
-}
-
 # Current client configuration, used for the tenant ID
 data "azurerm_client_config" "current" {}
 
@@ -101,13 +94,15 @@ resource "azurerm_key_vault_secret" "secrets" {
 
   name         = each.key
   value        = var.secrets[each.key].value
-  key_vault_id = local.key_vault_id_after_rbac
+  key_vault_id = azurerm_key_vault.main.id
 
   content_type    = var.secrets[each.key].content_type
   not_before_date = var.secrets[each.key].not_before_date
   expiration_date = var.secrets[each.key].expiration_date
 
   tags = merge(var.tags, var.secrets[each.key].tags)
+
+  depends_on = [azurerm_role_assignment.key_vault_rbac]
 }
 
 # Key Vault Keys
@@ -115,7 +110,7 @@ resource "azurerm_key_vault_key" "keys" {
   for_each = var.keys
 
   name         = each.key
-  key_vault_id = local.key_vault_id_after_rbac
+  key_vault_id = azurerm_key_vault.main.id
   key_type     = each.value.key_type
   key_size     = each.value.key_size
   key_opts     = each.value.key_opts
@@ -134,6 +129,8 @@ resource "azurerm_key_vault_key" "keys" {
       time_before_expiry = each.value.rotation_policy.automatic.time_before_expiry
     }
   }
+
+  depends_on = [azurerm_role_assignment.key_vault_rbac]
 }
 
 # Key Vault Certificates
@@ -142,7 +139,7 @@ resource "azurerm_key_vault_certificate" "certificates" {
   for_each = nonsensitive(toset(keys(var.certificates)))
 
   name         = each.key
-  key_vault_id = local.key_vault_id_after_rbac
+  key_vault_id = azurerm_key_vault.main.id
 
   tags = merge(var.tags, var.certificates[each.key].tags)
 
@@ -200,4 +197,6 @@ resource "azurerm_key_vault_certificate" "certificates" {
       password = var.certificates[each.key].certificate_password
     }
   }
+
+  depends_on = [azurerm_role_assignment.key_vault_rbac]
 }
