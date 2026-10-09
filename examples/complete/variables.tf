@@ -15,8 +15,7 @@ variable "allowed_ip_ranges" {
 
 variable "allowed_subnet_ids" {
   type        = set(string)
-  description = "List of virtual network subnet IDs allowed through the Key Vault firewall via service endpoints."
-  default     = []
+  description = "Subnet IDs allowed through the Key Vault firewall. Each subnet needs the Microsoft.KeyVault service endpoint. At least one is required."
 }
 
 variable "app_service_principal_name" {

@@ -26,7 +26,10 @@ module "key_vault" {
   location            = "East US"
   resource_group_name = "my-resource-group"
 
-  # Private Link access and audit logging (both required)
+  # Private Link access, service endpoint subnets and audit logging (all required)
+  network_acls = {
+    virtual_network_subnet_ids = [azurerm_subnet.app.id]
+  }
   private_endpoint = {
     subnet_id            = azurerm_subnet.private_endpoints.id
     private_dns_zone_ids = [azurerm_private_dns_zone.key_vault.id]
@@ -71,6 +74,7 @@ module "key_vault" {
     bypass         = "AzureServices"
     default_action = "Deny"
     ip_rules       = ["203.0.113.0/24", "198.51.100.0/24"]
+    virtual_network_subnet_ids = [azurerm_subnet.app.id]
   }
 
   # Private Link access and audit logging (both required)
@@ -226,7 +230,7 @@ Available key operations for the `key_opts` parameter:
 
 ## Network Access Control
 
-Configure network access using the `network_acls` variable:
+Configure network access using the `network_acls` variable. It is required and must list at least one subnet with the `Microsoft.KeyVault` service endpoint enabled:
 
 ```hcl
 network_acls = {
@@ -261,7 +265,7 @@ Terraform itself talks to the vault's data plane to create secrets, keys and cer
 | keys | A map of keys to create. Each key requires `expiration_date` and `rotation_policy` (`expire_after` <= 12 months). | `map(object)` | `{}` | no |
 | location | The Azure region where the Key Vault will be created. | `string` | n/a | yes |
 | log_analytics_workspace_id | Log Analytics workspace that receives audit and resource logs. | `string` | n/a | yes |
-| network_acls | Firewall configuration. `default_action` must be `Deny`. | `object` | deny, bypass AzureServices | no |
+| network_acls | Firewall configuration. `virtual_network_subnet_ids` needs at least one subnet and `default_action` must be `Deny`. | `object` | n/a | yes |
 | private_endpoint | `subnet_id` for the private endpoint and optional `private_dns_zone_ids`. | `object` | n/a | yes |
 | public_network_access_enabled | Whether public network access is allowed for this Key Vault. | `bool` | `false` | no |
 | purge_protection_enabled | Is Purge Protection enabled for this Key Vault? Must be true. | `bool` | `true` | no |
@@ -295,7 +299,7 @@ This module is **security-opinionated** and enforces several security best pract
 ### Mandatory Security Controls
 - **Purge Protection**: Always enabled and cannot be disabled to prevent accidental permanent deletion
 - **Soft Delete Retention**: Minimum 30 days (instead of Azure's 7-day minimum) for better recovery options
-- **Network ACLs**: Firewall always on; `default_action` must be `Deny` (allow Azure services by default)
+- **Network ACLs**: Firewall always on with `default_action` set to `Deny`, and access limited to at least one service endpoint subnet
 - **Public Access**: Disabled by default to promote private endpoint usage
 - **Key Size Validation**: RSA keys must be at least 2048 bits for cryptographic security
 - **Key Lifecycle**: Every key must have an expiration date and a rotation policy that expires versions within 12 months

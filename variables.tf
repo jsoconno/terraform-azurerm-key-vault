@@ -124,17 +124,16 @@ variable "log_analytics_workspace_id" {
 
 variable "network_acls" {
   type = object({
-    bypass                     = string
-    default_action             = string
+    bypass                     = optional(string, "AzureServices")
+    default_action             = optional(string, "Deny")
     ip_rules                   = optional(set(string))
-    virtual_network_subnet_ids = optional(set(string))
+    virtual_network_subnet_ids = set(string)
   })
-  description = "Network ACL (firewall) configuration for the Key Vault. default_action must be 'Deny'; allow specific networks with ip_rules and virtual_network_subnet_ids."
-  default = {
-    bypass                     = "AzureServices"
-    default_action             = "Deny"
-    ip_rules                   = null
-    virtual_network_subnet_ids = null
+  description = "Network ACL (firewall) configuration for the Key Vault. virtual_network_subnet_ids must list at least one subnet with the Microsoft.KeyVault service endpoint. default_action must be 'Deny'."
+
+  validation {
+    condition     = length(var.network_acls.virtual_network_subnet_ids) > 0
+    error_message = "network_acls.virtual_network_subnet_ids must contain at least one subnet so access is restricted to your virtual networks."
   }
 
   validation {
